@@ -6,19 +6,28 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 from groq import Groq
 from dotenv import load_dotenv
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 load_dotenv()
 
 app = Flask(__name__)
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
+# Setup Rate Limiter
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://"
+)
+
 def init_db():
     conn = sqlite3.connect('provenance.db')
     c = conn.cursor()
-    # Added stylo_score column
     c.execute('''CREATE TABLE IF NOT EXISTS audit_log
                  (content_id TEXT, creator_id TEXT, timestamp TEXT,
-                  attribution TEXT, confidence REAL, llm_score REAL, stylo_score REAL, status TEXT)''')
+                  attribution TEXT, confidence REAL, llm_score REAL, stylo_score REAL, status TEXT, appeal_reasoning TEXT)''')
     conn.commit()
     conn.close()
 
@@ -45,6 +54,7 @@ def get_stylo_score(text):
     return round(normalized, 2)
 
 @app.route('/submit', methods=['POST'])
+@limiter.limit("10 per minute;100 per day")
 def submit():
     data = request.json or {}
     text = data.get('text', '')
@@ -53,22 +63,25 @@ def submit():
     content_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    # Process Both Signals
     llm_score = get_llm_score(text)
     stylo_score = get_stylo_score(text)
-
-    # Confidence Scoring Logic (50/50 weighted average)
     confidence = round((llm_score + stylo_score) / 2.0, 2)
 
-    # Threshold Logic
-    attribution = "Likely AI" if confidence > 0.74 else "Uncertain" if confidence > 0.35 else "Likely Human"
-    label = "Placeholder Label" # Placeholder until M5
+    # Threshold and Label Logic
+    if confidence > 0.74:
+        attribution = "Likely AI"
+        label = "Content labeled as AI-generated (High Confidence)."
+    elif confidence > 0.35:
+        attribution = "Uncertain"
+        label = "Attribution uncertain. Content displays mixed or inconclusive signals."
+    else:
+        attribution = "Likely Human"
+        label = "Content labeled as Human-authored (High Confidence)."
 
-    # Write to Audit Log
     conn = sqlite3.connect('provenance.db')
     c = conn.cursor()
-    c.execute("INSERT INTO audit_log VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-              (content_id, creator_id, timestamp, attribution, confidence, llm_score, stylo_score, "classified"))
+    c.execute("INSERT INTO audit_log VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              (content_id, creator_id, timestamp, attribution, confidence, llm_score, stylo_score, "classified", ""))
     conn.commit()
     conn.close()
 
@@ -76,10 +89,23 @@ def submit():
         "content_id": content_id,
         "attribution": attribution,
         "confidence": confidence,
-        "llm_score": llm_score,
-        "stylo_score": stylo_score,
         "label": label
     })
+
+@app.route('/appeal', methods=['POST'])
+def appeal():
+    data = request.json or {}
+    content_id = data.get('content_id')
+    reasoning = data.get('creator_reasoning', '')
+
+    conn = sqlite3.connect('provenance.db')
+    c = conn.cursor()
+    c.execute("UPDATE audit_log SET status = 'under_review', appeal_reasoning = ? WHERE content_id = ?", 
+              (reasoning, content_id))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"status": "under_review", "message": "Appeal logged successfully."})
 
 @app.route('/log', methods=['GET'])
 def get_log():
