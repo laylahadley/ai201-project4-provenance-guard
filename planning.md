@@ -47,7 +47,7 @@ graph TD
     J --> K[Status Update: Under Review]
     K -->|Log Append| H
     H -->|Status 200| I
-
+```
 ## AI Tool Plan
 M3 (Submission endpoint + first signal)
 	- Provide to AI: Sections 1 (detection signals) and architecture diagram.
