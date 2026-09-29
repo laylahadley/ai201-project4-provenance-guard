@@ -1,108 +1,63 @@
-\# Provenance Guard: Architecture \& Planning
+# Provenance Guard: Planning & Specification
 
+## 1. Detection Signals
+* **Signal 1: LLM-Based Classification (Groq).** Measures semantic coherence and stylistic predictability. The output is a float between 0.0 (definitively human) and 1.0 (definitively AI).
+* **Signal 2: Stylometric Heuristics (Python).** Measures structural variance (sentence length and type-token ratio). The output is normalized to a float between 0.0 (high variance/human) and 1.0 (uniform/AI).
+* **Combination:** The final confidence score is a weighted average of both signals (50% weight each). 
 
+## 2. Uncertainty Representation
+A confidence score of 0.6 means the system detects some artificial traits (e.g., uniform sentence length) but retains enough semantic nuance that it cannot definitively confirm AI origin. 
+* **0.00 – 0.35:** Likely Human
+* **0.36 – 0.74:** Uncertain
+* **0.75 – 1.00:** Likely AI
 
-\## 1. Architecture Narrative
+## 3. Transparency Label Design
+* **High-confidence AI (0.75-1.00):** "Content labeled as AI-generated (High Confidence)."
+* **High-confidence human (0.00-0.35):** "Content labeled as Human-authored (High Confidence)."
+* **Uncertain (0.36-0.74):** "Attribution uncertain. Content displays mixed or inconclusive signals."
 
-When a user submits text, it hits the `POST /submit` endpoint and passes through a rate limiter. The text is then routed in parallel to our Multi-Signal Detection Pipeline, consisting of a Groq LLM semantic analyzer and a Python stylometric heuristic engine. Both signals return a raw score, which the Confidence Scoring module aggregates into a final confidence percentage. Based on predefined thresholds, the system selects one of three Transparency Labels (High-Confidence AI, High-Confidence Human, Uncertain). This entire decision, including the signals used and the final label, is written to the SQLite Audit Log. Finally, the endpoint returns the structured JSON response containing the result, score, and label to the user.
+## 4. Appeals Workflow
+* **Who submits:** The content creator.
+* **Information provided:** `submission_id` and a text `reasoning` explaining their drafting process.
+* **System action:** Updates the database status of the submission to "under review" and appends the appeal data to the audit log.
+* **Reviewer view:** A human reviewer opening the queue sees the original text, the individual signal scores, the final confidence score, and the creator's reasoning side-by-side.
 
+## 5. Anticipated Edge Cases
+1. **The Repetitive Poem:** A highly structured, repetitive children's poem with simple vocabulary will score very high for uniformity on the stylometric heuristic, potentially resulting in a false "Likely AI" classification.
+2. **The Slang-Edited AI Text:** A user might generate an essay with an AI, then manually inject random slang words and highly varied punctuation. This artificial burstiness breaks the stylometric heuristic, causing a false "Likely Human" score.
 
-
-\## 2. Detection Signals
-
-\*\*Signal 1: LLM-Based Classification (Groq)\*\*
-
-\* \*\*What it measures:\*\* Semantic and stylistic coherence. 
-
-\* \*\*Why it differs:\*\* AI models tend to produce highly predictable, formulaic structures, whereas human writing often contains unique idiomatic phrasing and narrative nuance.
-
-\* \*\*Blind spot:\*\* Highly edited, corporate-style human writing can easily be flagged as AI, and sophisticated AI prompting can mimic human quirks.
-
-
-
-\*\*Signal 2: Stylometric Heuristics (Python)\*\*
-
-\* \*\*What it measures:\*\* Sentence length variance and type-token ratio (vocabulary diversity).
-
-\* \*\*Why it differs:\*\* AI text statistically favors uniform sentence lengths and predictable vocabulary distribution. Human writing is structurally bursty (mixing very short and very long sentences).
-
-\* \*\*Blind spot:\*\* Extremely short submissions (e.g., a single sentence or tweet) do not contain enough data to establish statistical variance, rendering the heuristic useless.
-
-
-
-\## 3. False Positive Scenario \& Appeals
-
-\*\*Scenario:\*\* A human writer submits a highly structured, academic essay. The stylometric signal sees uniform sentence length, and the LLM sees formulaic phrasing. 
-
-\* \*\*Confidence Score:\*\* The system calculates a 0.55 score (leaning AI, but low confidence). 
-
-\* \*\*Transparency Label:\*\* Because it falls in the middle threshold, the system assigns the "Uncertain" label rather than firmly accusing the user of using AI.
-
-\* \*\*Appeal:\*\* The creator uses the `POST /appeal` endpoint, submitting their drafting history as reasoning. The system updates the database status to "under review" and logs the appeal alongside the original audit entry.
-
-
-
-\## 4. API Surface
-
-\* `POST /submit`
-
-&#x20; \* \*\*Accepts:\*\* JSON `{"text": "string"}`
-
-&#x20; \* \*\*Returns:\*\* JSON `{"attribution": "string", "confidence\_score": float, "transparency\_label": "string"}`
-
-\* `POST /appeal`
-
-&#x20; \* \*\*Accepts:\*\* JSON `{"submission\_id": "string", "reasoning": "string"}`
-
-&#x20; \* \*\*Returns:\*\* JSON `{"status": "under review", "message": "string"}`
-
-\* `GET /log`
-
-&#x20; \* \*\*Accepts:\*\* None
-
-&#x20; \* \*\*Returns:\*\* JSON array of recent audit log entries.
-
-
-
-\## 5. Architecture Diagram
-
-
+## Architecture
+When a submission arrives at `POST /submit`, it is processed in parallel by an LLM signal and a stylometric signal, which generate a combined confidence score, assign a transparency label, log the decision to SQLite, and return the result. If a creator contests the label via `POST /appeal`, the system updates the log status to "under review" without overwriting the original decision.
 
 ```mermaid
-
 graph TD
+    %% Submission Flow
+    A[Client] -->|Raw Text| B(POST /submit)
+    B --> C{Rate Limiter}
+    C -->|Allowed| D[Signal 1: Groq LLM]
+    C -->|Allowed| E[Signal 2: Stylometrics]
+    D -->|Semantic Score| F[Confidence Scoring]
+    E -->|Structural Score| F
+    F -->|Combined Score| G[Transparency Labeler]
+    G -->|Label Text| H[(SQLite Audit Log)]
+    H -->|Status 200| A
+    
+    %% Appeal Flow
+    I[Creator] -->|Submission ID + Reason| J(POST /appeal)
+    J --> K[Status Update: Under Review]
+    K -->|Log Append| H
+    H -->|Status 200| I
 
-&#x20;   %% Submission Flow
-
-&#x20;   A\[Client] -->|Raw Text| B(POST /submit)
-
-&#x20;   B --> C{Rate Limiter}
-
-&#x20;   C -->|Allowed| D\[Signal 1: Groq LLM]
-
-&#x20;   C -->|Allowed| E\[Signal 2: Stylometrics]
-
-&#x20;   D -->|Semantic Score| F\[Confidence Scoring]
-
-&#x20;   E -->|Structural Score| F
-
-&#x20;   F -->|Combined Score| G\[Transparency Labeler]
-
-&#x20;   G -->|Label Text| H\[(SQLite Audit Log)]
-
-&#x20;   H -->|Status 200| A
-
-&#x20;   
-
-&#x20;   %% Appeal Flow
-
-&#x20;   I\[Creator] -->|Submission ID + Reason| J(POST /appeal)
-
-&#x20;   J --> K\[Status Update: Under Review]
-
-&#x20;   K -->|Log Append| H
-
-&#x20;   H -->|Status 200| I
-
-
-
+## AI Tool Plan
+M3 (Submission endpoint + first signal)
+	- Provide to AI: Sections 1 (detection signals) and architecture diagram.
+	- Ask for: Flask app skeleton with rate limiting, and the implementation of the Groq LLM first signal function.
+	- Verify: Test the standalone function with a clear AI input and clear human input directly in a Python script before wiring it 	into the Flask endpoint.
+M4 (Second signal + confidence scoring)
+	- Provide to AI: Sections 1 (Detection signals), 2 (Uncertainty representation), and Architecture diagram.
+	- Ask for: Pure Python stylometric heuristic function (Signal 2) and the logic to calculate the weighted average of both signals.
+	- Verify: Run a batch of 5 mixed inputs and check that the combined scores vary meaningfully and do not clump entirely at 0.0 or 	1.0.
+M5 (production layer)
+	- Provide to AI: Sections 3 (Transparency label design), 4 (Appeals workflow), and Architecture diagram.
+	- Ask for: Logic to map the combined score to the three exact label text variants, plus the SQLite audit logging and the POST 	/appeal endpoint.
+	- Verify: Trigger submissions that hit all three score thresholds to confirm label exactness, then submit an appeal and query the 	database to ensure the "under review" status applied correctly.
